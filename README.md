@@ -2,7 +2,7 @@
 
 **Live dashboard:** https://abdulbasit-ogunrinu.github.io/sales-analytics-dashboard/
 
-An explanation of `index.html` — a single-file report of 1,500 sales orders covering
+An explanation of `https://abdulbasit-ogunrinu.github.io/sales-analytics-dashboard/` — a single-file report of 1,500 sales orders covering
 **1 January 2023 to 30 June 2025**.
 
 The dashboard exists to answer a narrow question honestly: *what do these numbers actually
