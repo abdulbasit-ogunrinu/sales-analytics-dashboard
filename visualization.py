@@ -1,15 +1,30 @@
 import pandas as pd
 import numpy as np
+import sys
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import seaborn as sns
 from matplotlib.gridspec import GridSpec
+from matplotlib.patches import Patch
+
+# Windows consoles default to cp1252 and raise UnicodeEncodeError on the
+# box-drawing / arrow characters used in the report below.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 df = pd.read_csv("cleaned_sales_data.csv", parse_dates=["Date","OrderDate","DeliveryDate"])
 df["YearMonth"] = pd.to_datetime(df["Date"]).dt.to_period("M")
 
 # ── Palette ───────────────────────────────────────────────────────────────────
-PALETTE = ["#534AB7", "#1D9E75", "#D85A30", "#BA7517", "#185FA5", "#D4537E", "#639922"]
+# Maroon & white, matching the static dashboard.
+PALETTE = ["#6D1220", "#A94659", "#C98A97", "#8E2233", "#4A0A14", "#B8892B", "#E8C4CC"]
+CMAP_REVENUE = ["#FFFFFF", "#FAECEE", "#E8C4CC", "#C98A97", "#A94659", "#5A0E1B"]
+CMAP_RETURN  = ["#1D6B4A", "#8FBF9F", "#FAECEE", "#E8C4CC", "#8E2233", "#4A0A14"]
+CMAP_CORR    = ["#4A0A14", "#A94659", "#F3E4E7", "#FFFFFF", "#E8C4CC", "#8E2233", "#6D1220"]
+
 sns.set_theme(style="whitegrid", font_scale=1.0)
 plt.rcParams.update({"figure.facecolor": "white", "axes.facecolor": "white",
                      "font.family": "DejaVu Sans"})
@@ -68,17 +83,24 @@ quarterly = (df.groupby(["Year","Quarter"])["TotalPrice"].sum()
                .reset_index().sort_values(["Year","Quarter"]))
 quarterly["Label"] = quarterly["Year"].astype(str) + " Q" + quarterly["Quarter"].astype(str)
 ax = axes[1, 1]
-colors_q = [PALETTE[0] if y == 2023 else PALETTE[1] if y == 2024 else PALETTE[2]
-            for y in quarterly["Year"]]
-ax.bar(quarterly["Label"], quarterly["TotalPrice"] / 1000, color=colors_q, width=0.6)
+# Colour by the years actually present instead of hard-coding 2023/2024/2025.
+# The final year is partial (H1 only) so it gets the pale maroon.
+years_present = sorted(quarterly["Year"].unique())
+last_year = df["Date"].max().year
+year_colors = [PALETTE[0] if y != last_year else PALETTE[2] for y in quarterly["Year"]]
+ax.bar(quarterly["Label"], quarterly["TotalPrice"] / 1000, color=year_colors, width=0.6)
 ax.set_title("Quarterly Revenue by Year", fontweight="bold")
 ax.set_ylabel("Revenue ($K)")
 ax.tick_params(axis="x", rotation=45)
 ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}K"))
-from matplotlib.patches import Patch
-ax.legend(handles=[Patch(color=PALETTE[0], label="2023"),
-                   Patch(color=PALETTE[1], label="2024"),
-                   Patch(color=PALETTE[2], label="2025")],
+# Mark the partial year explicitly so the drop is not read as a real decline.
+partial = quarterly[quarterly["Year"] == last_year]
+if not partial.empty:
+    ax.annotate(f"{last_year} is H1 only", xy=(0.5, -0.30), xycoords="axes fraction",
+                ha="center", fontsize=9, color="#8B6670", style="italic")
+ax.legend(handles=[Patch(color=PALETTE[2] if y == last_year else PALETTE[0],
+                         label=f"{y}" + (" (H1)" if y == last_year else ""))
+                   for y in years_present],
           loc="upper left", fontsize=9)
 
 fig1.tight_layout()
@@ -121,12 +143,16 @@ promo_rev = (df.groupby("Promotion")["TotalPrice"].sum()
 ax = axes[1, 0]
 bars = ax.bar(promo_rev["Promotion"], promo_rev["TotalPrice"] / 1000,
               color=PALETTE[:len(promo_rev)])
-ax.set_title("Revenue by Promotion Code", fontweight="bold")
+ax.set_title("Revenue by Promotion (incl. No Promotion)", fontweight="bold")
 ax.set_ylabel("Revenue ($K)")
 ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}K"))
 for bar, val in zip(bars, promo_rev["TotalPrice"]):
     ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 5,
             f"${val/1000:,.1f}K", ha="center", fontsize=9)
+# Previously the "No Promotion" orders were dropped here because the sentinel
+# was parsed back to NaN, so this chart was missing ~24.5% of revenue.
+ax.text(0.5, -0.22, "Promo codes do not match the discounts they advertise",
+        transform=ax.transAxes, ha="center", fontsize=9, color="#8B6670", style="italic")
 
 # 2d. Discount bucket vs avg order value
 disc_aov = (df.groupby("DiscountBucket")["TotalPrice"].mean()
@@ -209,7 +235,7 @@ fig4.suptitle("Product–Region Heatmaps", fontsize=16, fontweight="bold")
 pivot_rev = df.pivot_table(values="TotalPrice", index="Region",
                            columns="Product", aggfunc="sum") / 1000
 ax = axes[0]
-sns.heatmap(pivot_rev, annot=True, fmt=".0f", cmap="YlOrRd",
+sns.heatmap(pivot_rev, annot=True, fmt=".0f", cmap=sns.color_palette(CMAP_REVENUE, as_cmap=True),
             linewidths=0.5, ax=ax, cbar_kws={"label": "Revenue ($K)"})
 ax.set_title("Revenue ($K): Region × Product", fontweight="bold")
 ax.set_xlabel(""); ax.set_ylabel("")
@@ -218,10 +244,14 @@ ax.set_xlabel(""); ax.set_ylabel("")
 pivot_ret = df.pivot_table(values="Returned", index="Region",
                            columns="Product", aggfunc="mean") * 100
 ax = axes[1]
-sns.heatmap(pivot_ret, annot=True, fmt=".1f", cmap="RdYlGn_r",
+sns.heatmap(pivot_ret, annot=True, fmt=".1f", cmap=sns.color_palette(CMAP_RETURN, as_cmap=True),
             linewidths=0.5, ax=ax, cbar_kws={"label": "Return Rate (%)"})
 ax.set_title("Return Rate (%): Region × Product", fontweight="bold")
 ax.set_xlabel(""); ax.set_ylabel("")
+# Return-rate spread across products/regions is not statistically significant
+# at this sample size, so say so on the figure itself.
+ax.text(0.5, -0.20, "Differences are within noise (χ² p = 0.60)",
+        transform=ax.transAxes, ha="center", fontsize=9, color="#8B6670", style="italic")
 
 fig4.tight_layout()
 fig4.savefig("fig4_heatmaps.png", dpi=150, bbox_inches="tight")
@@ -252,7 +282,8 @@ corr_cols = ["Quantity","UnitPrice","Discount","TotalPrice",
 corr = df[corr_cols].corr()
 ax = axes[1]
 mask = np.triu(np.ones_like(corr, dtype=bool))
-sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", center=0,
+sns.heatmap(corr, annot=True, fmt=".2f",
+            cmap=sns.diverging_palette(20, 350, s=80, l=55, as_cmap=True),
             mask=mask, linewidths=0.5, ax=ax,
             cbar_kws={"shrink": 0.8})
 ax.set_title("Numeric Correlation Matrix", fontweight="bold")

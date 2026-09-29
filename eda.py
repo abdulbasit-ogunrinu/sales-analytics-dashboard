@@ -1,5 +1,14 @@
 import pandas as pd
 import numpy as np
+import sys
+
+# Windows consoles default to cp1252 and raise UnicodeEncodeError on the
+# box-drawing / arrow / en-dash characters used in the report below.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 df = pd.read_csv("cleaned_sales_data.csv", parse_dates=["Date","OrderDate","DeliveryDate"])
 df["YearMonth"] = pd.to_datetime(df["Date"]).dt.to_period("M")
@@ -137,3 +146,44 @@ corr_cols = ["Quantity","UnitPrice","Discount","TotalPrice","ShippingCost",
 print(df[corr_cols].corr().round(3).to_string())
 
 print("\n[✓] EDA complete.")
+
+# ── Caveats that matter when reading the tables above ────────────────────────
+print("\n" + "=" * 60)
+print("CAVEATS — read before quoting any of the above")
+print("=" * 60)
+
+last_year = int(df["Date"].max().year)
+last_month = int(df["Date"].max().month)
+h1_cur = df[(df["Year"] == last_year) & (df["Month"] <= 6)]["TotalPrice"].sum()
+h1_prev = df[(df["Year"] == last_year - 1) & (df["Month"] <= 6)]["TotalPrice"].sum()
+prev_full = df[df["Year"] == last_year - 1]["TotalPrice"].sum()
+print(f"\n1. {last_year} is a PARTIAL YEAR (ends month {last_month}).")
+print(f"   Raw totals make it look like a {(h1_cur / prev_full - 1) * 100:.0f}% decline,")
+print(f"   but H1-to-H1 is {(h1_cur / h1_prev - 1) * 100:+.1f}% and annualised")
+print(f"   {last_year} is ${h1_cur * 2:,.0f} vs ${prev_full:,.0f} for {last_year - 1}.")
+print("   Compare H1-to-H1 only.")
+
+# Return-rate significance
+from scipy import stats
+
+
+def chi2_p(col):
+    t = df.groupby(col)["Returned"].agg(["sum", "count"])
+    tab = np.column_stack([t["sum"], t["count"] - t["sum"]])
+    return float(stats.chi2_contingency(tab)[1])
+
+
+print("\n2. Return-rate differences are NOT statistically significant:")
+for c in ["Product", "Region", "CustomerType", "Salesperson"]:
+    r = df.groupby(c)["Returned"].mean() * 100
+    p = chi2_p(c)
+    print(f"   {c:13} {r.min():.1f}%-{r.max():.1f}%  p = {p:.2f}  "
+          f"{'significant' if p < 0.05 else '-> noise'}")
+
+print("\n3. Revenue columns are raw sums, not per-order values. Order counts are")
+print("   fairly even, so rankings mostly track volume — use AvgOrderValue to")
+print("   separate basket size from order count.")
+
+print("\n4. Promotion codes do not encode the discount actually granted, so the")
+print("   promotion table cannot be used to judge promo effectiveness.")
+print("   'No Promotion' orders are included (an earlier version silently lost them).")

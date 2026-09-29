@@ -1,5 +1,13 @@
-dash
+# Data pipeline
 pandas
 numpy
+openpyxl
+scipy
+
+# Dashboard (static, self-contained HTML — no Dash/web server needed)
 plotly
-gunicorn
+
+# Exploratory figures and models
+matplotlib
+seaborn
+scikit-learn

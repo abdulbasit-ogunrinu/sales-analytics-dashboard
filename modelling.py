@@ -1,21 +1,31 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import sys
 import warnings
 warnings.filterwarnings("ignore")
+
+# Windows consoles default to cp1252 and raise UnicodeEncodeError on the
+# box-drawing / arrow characters used in the report below.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.metrics import (classification_report, confusion_matrix,
                              roc_auc_score, roc_curve,
                              mean_absolute_error, mean_squared_error, r2_score)
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier,
+                              RandomForestRegressor, GradientBoostingRegressor)
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.tree import DecisionTreeClassifier
 import matplotlib.ticker as mticker
 
 df = pd.read_csv("cleaned_sales_data.csv", parse_dates=["Date","OrderDate","DeliveryDate"])
-PALETTE = ["#534AB7", "#1D9E75", "#D85A30", "#BA7517", "#185FA5"]
+PALETTE = ["#6D1220", "#A94659", "#C98A97", "#8E2233", "#4A0A14"]
 
 print("=" * 60)
 print("PHASE 4 — PREDICTIVE MODELLING")
@@ -27,21 +37,36 @@ print("=" * 60)
 # ══════════════════════════════════════════════════════════════════════════════
 print("\n── MODEL A: Return Prediction (Classification) ──")
 
+# NOTE: the encoders must be fitted on the TRAIN split only. Fitting them on the
+# full frame before the split leaks the held-out rows' category vocabulary into
+# training (a "test-set-informed" fit), which inflates CV scores.
 cat_cols = ["Region", "Product", "CustomerType", "PaymentMethod",
             "Promotion", "StoreLocation", "Salesperson", "DiscountBucket"]
 num_cols = ["Quantity", "UnitPrice", "Discount", "ShippingCost", "DeliveryDays"]
 
-df_model = df.copy()
-le = LabelEncoder()
+enc_cols = [c + "_enc" for c in cat_cols]
+feature_cols = enc_cols + num_cols
+
+# Split first, on the raw frame, so the encoders can be fitted train-only.
+X_raw = df[cat_cols + num_cols]
+y = df["Returned"]
+X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+    X_raw, y, test_size=0.2, random_state=42, stratify=y)
+
+# Fit encoders on the training half only, then transform the test half with the
+# same mapping. (A category absent from train maps to -1 rather than inventing
+# a new code.)
+X_train = X_train_raw.copy()
+X_test = X_test_raw.copy()
 for col in cat_cols:
-    df_model[col + "_enc"] = le.fit_transform(df_model[col].astype(str))
+    le = LabelEncoder()
+    X_train[col + "_enc"] = le.fit_transform(X_train[col].astype(str))
+    X_test[col + "_enc"] = pd.Series(
+        le.transform(X_test[col].astype(str)),
+        index=X_test.index, dtype=X_train[col + "_enc"].dtype)
 
-feature_cols = [c + "_enc" for c in cat_cols] + num_cols
-X = df_model[feature_cols]
-y = df_model["Returned"]
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y)
+X_train = X_train[feature_cols]
+X_test = X_test[feature_cols]
 
 scaler = StandardScaler()
 X_train_s = scaler.fit_transform(X_train)
@@ -56,8 +81,12 @@ models_cls = {
 }
 
 cls_results = {}
-print(f"\n{'Model':<25} {'Accuracy':>10} {'AUC':>8} {'F1-Return':>12}")
-print("-" * 58)
+baseline_acc = y_train.value_counts(normalize=True).max()
+print(f"\n{'Model':<25} {'Accuracy':>10} {'AUC':>8} {'F1-Return':>12} {'CV AUC':>9}")
+print("-" * 70)
+print(f"{'[majority-class baseline]':<25} {baseline_acc:>10.4f} {0.5:>8.4f} {'-':>12} {'-':>9}")
+
+cv = StratifiedKFold(5, shuffle=True, random_state=42)
 
 for name, model in models_cls.items():
     X_tr = X_train_s if name == "Logistic Regression" else X_train.values
@@ -69,15 +98,28 @@ for name, model in models_cls.items():
     auc    = roc_auc_score(y_test, proba)
     report = classification_report(y_test, preds, output_dict=True)
     f1_ret = report["1"]["f1-score"]
+    # Cross-validated AUC on the training data only, so the best-model pick is
+    # not made on the same split the headline score is reported from.
+    cv_auc = cross_val_score(
+        type(model)(**model.get_params()), X_tr, y_train, cv=cv,
+        scoring="roc_auc").mean()
     cls_results[name] = {"model": model, "acc": acc, "auc": auc,
                           "preds": preds, "proba": proba, "f1": f1_ret,
-                          "X_te": X_te}
-    print(f"{name:<25} {acc:>10.4f} {auc:>8.4f} {f1_ret:>12.4f}")
+                          "cv_auc": cv_auc, "X_te": X_te}
+    print(f"{name:<25} {acc:>10.4f} {auc:>8.4f} {f1_ret:>12.4f} {cv_auc:>9.4f}")
 
-# Best model
-best_name = max(cls_results, key=lambda k: cls_results[k]["auc"])
+# Best model, chosen by CV AUC rather than test AUC
+best_name = max(cls_results, key=lambda k: cls_results[k]["cv_auc"])
 best = cls_results[best_name]
-print(f"\n[Best] {best_name}  (AUC = {best['auc']:.4f})")
+print(f"\n[Best] {best_name}  (CV AUC = {best['cv_auc']:.4f}, test AUC = {best['auc']:.4f})")
+
+if best["cv_auc"] < 0.55:
+    print("\n" + "!" * 70)
+    print("!! NO PREDICTIVE SIGNAL. Every model's cross-validated AUC is within")
+    print("!! chance of 0.50, so the ranking above is noise. The models cannot")
+    print("!! tell you which orders will be returned, and accuracy is simply the")
+    print("!! majority-class rate. Do not use these predictions operationally.")
+    print("!" * 70)
 
 print("\nClassification Report (Best Model):")
 X_te_best = best["X_te"]
@@ -126,28 +168,39 @@ plt.close()
 # Target: TotalPrice
 # ══════════════════════════════════════════════════════════════════════════════
 print("\n── MODEL B: Revenue Prediction (Regression) ──")
+print("   NOTE: TotalPrice = Quantity x UnitPrice x (1 - Discount) exactly, and")
+print("   all three are supplied as features. This is an identity, not a")
+print("   prediction problem - a near-perfect score is arithmetic, not skill.")
 
-reg_features = [c + "_enc" for c in cat_cols] + \
-               ["Quantity", "UnitPrice", "Discount", "ShippingCost"]
-X_reg = df_model[reg_features]
-y_reg = df_model["TotalPrice"]
+reg_cat = [c + "_enc" for c in cat_cols]
+reg_num = ["Quantity", "UnitPrice", "Discount", "ShippingCost"]
+reg_features = reg_cat + reg_num
 
-X_tr_r, X_te_r, y_tr_r, y_te_r = train_test_split(
-    X_reg, y_reg, test_size=0.2, random_state=42)
+# Use the same random_state so the numeric and categorical halves stay row-aligned.
+idx = np.arange(len(df))
+idx_tr, idx_te = train_test_split(idx, test_size=0.2, random_state=42)
+X_tr_r = df.loc[idx_tr, reg_num].copy()
+X_te_r = df.loc[idx_te, reg_num].copy()
+y_tr_r = df.loc[idx_tr, "TotalPrice"]
+y_te_r = df.loc[idx_te, "TotalPrice"]
+
+# Fit the categorical encoders on the training half only (no test-set leakage).
+for col in cat_cols:
+    le = LabelEncoder()
+    X_tr_r[col + "_enc"] = le.fit_transform(df.loc[idx_tr, col].astype(str))
+    X_te_r[col + "_enc"] = le.transform(df.loc[idx_te, col].astype(str))
+
+X_tr_r = X_tr_r[reg_features]
+X_te_r = X_te_r[reg_features]
 
 scaler_r = StandardScaler()
 X_tr_rs = scaler_r.fit_transform(X_tr_r)
 X_te_rs  = scaler_r.transform(X_te_r)
 
-models_reg = {
-    "Linear Regression": LinearRegression(),
-    "Random Forest":     RandomForestClassifier(n_estimators=100, random_state=42),
-    "Gradient Boosting": GradientBoostingClassifier(n_estimators=100, random_state=42),
-}
-
-# Use sklearn regression versions
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-
+# Regressor classes only. (An earlier draft built this dict with
+# *Classifier estimators for a regression target, then immediately overwrote it
+# with the regressors below - the classifier dict was dead code that could only
+# ever raise if it were ever used.)
 models_reg = {
     "Linear Regression": LinearRegression(),
     "Random Forest":     RandomForestRegressor(n_estimators=100, random_state=42),
@@ -218,7 +271,6 @@ monthly = (df.groupby(pd.Grouper(key="Date", freq="ME"))["TotalPrice"].sum()
 monthly["RollingAvg3"] = monthly["y"].rolling(3).mean()
 
 # Linear trend
-from numpy.polynomial import polynomial as P
 x = np.arange(len(monthly))
 coeffs = np.polyfit(x, monthly["y"], 1)
 trend_line = np.poly1d(coeffs)
@@ -232,11 +284,37 @@ last_date = monthly["ds"].iloc[-1]
 future_dates = pd.date_range(start=last_date + pd.DateOffset(months=1),
                               periods=n_forecast, freq="ME")
 
+# Honest uncertainty band. The previous version drew a fixed "±12% confidence
+# band" that was a hard-coded constant with no statistical basis. Replace it
+# with a proper prediction interval from the trend fit's residuals.
+resid = monthly["y"] - trend_line(x)
+sigma = float(np.sqrt((resid ** 2).sum() / max(1, len(x) - 2)))
+# 95% interval on a mean response, widened by the leverage term.
+t_crit = 1.96
+leverage = 1 + (1 / len(x)) + ((future_x - x.mean()) ** 2 / ((x - x.mean()) ** 2).sum())
+band = t_crit * sigma * np.sqrt(leverage)
+
+# Is there a trend at all?
+slope_p = float(np.corrcoef(x, monthly["y"])[0, 1])
+r2_trend = float(np.corrcoef(x, monthly["y"])[0, 1] ** 2)
+
 print(f"\nActual period : {monthly['ds'].iloc[0].strftime('%b %Y')} – {last_date.strftime('%b %Y')}")
 print(f"Forecast period: {future_dates[0].strftime('%b %Y')} – {future_dates[-1].strftime('%b %Y')}")
-print("\nForecasted monthly revenue:")
-for d, v in zip(future_dates, forecast_vals):
-    print(f"  {d.strftime('%b %Y')}: ${v:,.2f}")
+print(f"\nTrend: slope ${coeffs[0]:,.0f}/month, r = {slope_p:+.3f} (R² = {r2_trend:.3f})")
+print(f"Residual sigma: ${sigma:,.0f}   95% half-width: ${band.mean():,.0f} "
+      f"({band.mean() / forecast_vals.mean() * 100:.0f}% of the forecast)")
+
+if r2_trend < 0.15:
+    print("\n" + "!" * 70)
+    print("!! NO USABLE TREND. The monthly series is essentially flat")
+    print(f"!! (R² = {r2_trend:.3f}), and month-to-month noise is larger than the")
+    print("!! fitted trend. Treat the numbers below as a flat baseline around the")
+    print("!! historical average, not as a forecast with a direction.")
+    print("!" * 70)
+
+print("\nForecasted monthly revenue (95% prediction interval):")
+for d, v, bw in zip(future_dates, forecast_vals, band):
+    print(f"  {d.strftime('%b %Y')}: ${v:,.0f}  +/- ${bw:,.0f}")
 
 fig, ax = plt.subplots(figsize=(12, 5))
 ax.plot(monthly["ds"], monthly["y"] / 1000, label="Actual", color=PALETTE[0],
@@ -245,9 +323,9 @@ ax.plot(monthly["ds"], trend_line(x) / 1000, label="Linear Trend",
         color=PALETTE[2], linestyle="--", linewidth=1.5)
 ax.plot(future_dates, forecast_vals / 1000, label="6-Month Forecast",
         color=PALETTE[1], linestyle="--", marker="s", markersize=6, linewidth=2)
-ax.fill_between(future_dates, (forecast_vals * 0.88) / 1000,
-                (forecast_vals * 1.12) / 1000, alpha=0.15, color=PALETTE[1],
-                label="±12% Confidence Band")
+ax.fill_between(future_dates, (forecast_vals - band) / 1000,
+                (forecast_vals + band) / 1000, alpha=0.15, color=PALETTE[1],
+                label="95% Prediction Interval")
 ax.axvline(last_date, color="gray", linestyle=":", linewidth=1, alpha=0.7)
 ax.set_title("Monthly Revenue — Actual + 6-Month Forecast", fontsize=13, fontweight="bold")
 ax.set_ylabel("Revenue ($K)")
