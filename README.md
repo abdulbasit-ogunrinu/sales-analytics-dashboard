@@ -1,5 +1,7 @@
 # Sales Analytics Dashboard
 
+**Live dashboard:** https://abdulbasit-ogunrinu.github.io/sales-analytics-dashboard/
+
 An explanation of `index.html` — a single-file report of 1,500 sales orders covering
 **1 January 2023 to 30 June 2025**.
 
@@ -418,8 +420,9 @@ output and asserts that the promotion breakdown reconciles, so this cannot regre
 | `cleaned_sales_data.csv` | Generated. 1,500 rows × 28 columns |
 | `Product-Sales-Region.xlsx` | Source data. Never modified |
 | `eda.py` | Optional: console exploratory analysis |
-| `visualization.py` | Optional: `fig1`–`fig5` |
-| `modelling.py` | Optional: `fig6`–`fig8` |
+| `visualization.py` | Optional: writes `fig1`–`fig5` PNGs |
+| `modelling.py` | Optional: writes `fig6`–`fig8` PNGs |
 
 The three optional scripts are independent of each other and of the dashboard. They read the
-same cleaned CSV and are not required to view or rebuild the dashboard.
+same cleaned CSV and are not required to view or rebuild the dashboard. Their PNG output is
+generated on demand and is not kept in the repository.
